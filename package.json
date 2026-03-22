@@ -1,0 +1,52 @@
+{
+  "name": "lumenlang",
+  "displayName": "Lumen Language",
+  "description": "Language support for Lumen (.luma) via the Lumen LSP.",
+  "version": "0.1.2",
+  "publisher": "lumenlang",
+  "license": "GPL-3.0",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "lumen",
+    "luma",
+    "language",
+    "lsp"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LumenLang/vscode-lumen"
+  },
+  "activationEvents": [
+    "onLanguage:lumen",
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "lumen",
+        "aliases": [
+          "Lumen"
+        ],
+        "extensions": [
+          ".luma"
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^2.22.0"
+  }
+}
