@@ -1,6 +1,8 @@
-# Lumen Language
+# VSCode extension for Lumen
 
 VS Code extension providing language support for **Lumen** (`.luma` files).
+
+It is available at: https://marketplace.visualstudio.com/items?itemName=lumenlang.lumenlang to download.
 
 ## Features
 
