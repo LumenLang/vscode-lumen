@@ -12,7 +12,7 @@ let client;
 
 let headlessProcess = null;
 let headlessReady = false;
-let headlessBuffer = '';
+let headlessBuffer = "";
 let headlessResponseCb = null;
 let diagnosticCollection;
 let validationTimer = null;
@@ -22,6 +22,8 @@ let textChangeDisposable = null;
 let resolvedJavaPath = null;
 let extensionContext = null;
 let outputChannel = null;
+let requestQueue = Promise.resolve();
+let validationInFlight = false;
 
 /**
  * @param {vscode.ExtensionContext} context
@@ -29,15 +31,16 @@ let outputChannel = null;
 async function activate(context) {
     extensionContext = context;
     outputChannel = vscode.window.createOutputChannel("Lumen LSP");
+    context.subscriptions.push(outputChannel);
     const output = outputChannel;
 
-    diagnosticCollection = vscode.languages.createDiagnosticCollection('lumen-headless');
+    diagnosticCollection = vscode.languages.createDiagnosticCollection("lumen-headless");
     context.subscriptions.push(diagnosticCollection);
 
-    context.subscriptions.push(vscode.commands.registerCommand('lumen.validateScript', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand("lumen.validateScript", async () => {
         const editor = vscode.window.activeTextEditor;
-        if (!editor || editor.document.languageId !== 'lumen') {
-            vscode.window.showWarningMessage('No active Lumen script to validate.');
+        if (!editor || editor.document.languageId !== "lumen") {
+            vscode.window.showWarningMessage("No active Lumen script to validate.");
             return;
         }
 
@@ -46,26 +49,17 @@ async function activate(context) {
         try {
             await ensureHeadless();
         } catch (err) {
-            vscode.window.showErrorMessage('Failed to start LumenHeadless: ' + err.message);
+            vscode.window.showErrorMessage("Failed to start LumenHeadless: " + err.message);
             return;
         }
 
         lastTypeTime = Date.now();
-        textChangeDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
-            if (e.document.languageId === 'lumen') {
-                lastTypeTime = Date.now();
-            }
-        });
 
         const hasErrors = await validateDocument(editor.document);
         if (hasErrors) {
             startValidationLoop();
         } else {
-            vscode.window.showInformationMessage('Lumen validation passed!');
-            if (textChangeDisposable) {
-                textChangeDisposable.dispose();
-                textChangeDisposable = null;
-            }
+            vscode.window.showInformationMessage("Lumen validation passed!");
         }
     }));
 
@@ -383,77 +377,95 @@ async function ensureHeadless() {
         resolvedJavaPath = await resolveJava(extensionContext, outputChannel);
     }
 
+    requestQueue = Promise.resolve();
+
     return new Promise((resolve, reject) => {
         let settled = false;
+        let readyTimeout;
+
+        function settle(fn) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(readyTimeout);
+            fn();
+        }
 
         headlessProcess = spawn(resolvedJavaPath, ["-jar", jarPath, "--server"], {
-            stdio: ['pipe', 'pipe', 'pipe']
+            stdio: ["pipe", "pipe", "pipe"]
         });
 
-        headlessBuffer = '';
+        headlessBuffer = "";
 
-        headlessProcess.stdout.on('data', (data) => {
+        headlessProcess.on("error", (err) => {
+            outputChannel.appendLine("LumenHeadless spawn error: " + err.message);
+            headlessProcess = null;
+            headlessReady = false;
+            settle(() => reject(new Error("Failed to spawn LumenHeadless: " + err.message)));
+        });
+
+        headlessProcess.stdout.on("data", (data) => {
             headlessBuffer += data.toString();
             let idx;
-            while ((idx = headlessBuffer.indexOf('\n')) !== -1) {
+            while ((idx = headlessBuffer.indexOf("\n")) !== -1) {
                 const line = headlessBuffer.substring(0, idx).trim();
                 headlessBuffer = headlessBuffer.substring(idx + 1);
                 if (!line) continue;
 
                 try {
                     const parsed = JSON.parse(line);
-                    if (!settled && parsed.status === 'ready') {
-                        settled = true;
+                    if (!settled && parsed.status === "ready") {
                         headlessReady = true;
-                        outputChannel.appendLine('LumenHeadless ready: ' + JSON.stringify(parsed));
-                        resolve();
+                        outputChannel.appendLine("LumenHeadless ready: " + JSON.stringify(parsed));
+                        settle(() => resolve());
                     } else if (headlessResponseCb) {
                         const cb = headlessResponseCb;
                         headlessResponseCb = null;
                         cb(parsed);
                     }
                 } catch (e) {
-                    outputChannel.appendLine('LumenHeadless stdout (unparseable): ' + line);
+                    outputChannel.appendLine("LumenHeadless stdout (unparseable): " + line);
                 }
             }
         });
 
-        headlessProcess.stderr.on('data', (data) => {
-            outputChannel.appendLine('LumenHeadless stderr: ' + data.toString().trim());
+        headlessProcess.stderr.on("data", (data) => {
+            outputChannel.appendLine("LumenHeadless stderr: " + data.toString().trim());
         });
 
-        headlessProcess.on('close', (code) => {
-            outputChannel.appendLine('LumenHeadless exited with code ' + code);
+        headlessProcess.on("close", (code) => {
+            outputChannel.appendLine("LumenHeadless exited with code " + code);
             headlessProcess = null;
             headlessReady = false;
-            if (!settled) {
-                settled = true;
-                reject(new Error('LumenHeadless exited before ready (code ' + code + ')'));
-            }
+            settle(() => reject(new Error("LumenHeadless exited before ready (code " + code + ")")));
             if (headlessResponseCb) {
                 const cb = headlessResponseCb;
                 headlessResponseCb = null;
-                cb({ ok: false, error: 'Process exited unexpectedly' });
+                cb({
+                    ok: false,
+                    error: "Process exited unexpectedly",
+                    errors: [{ line: 1, message: "LumenHeadless process exited unexpectedly" }]
+                });
             }
         });
 
-        setTimeout(() => {
-            if (!settled) {
-                settled = true;
-                reject(new Error('LumenHeadless did not become ready within 30s'));
-            }
+        readyTimeout = setTimeout(() => {
+            settle(() => reject(new Error("LumenHeadless did not become ready within 30s")));
         }, 30000);
     });
 }
 
 function sendHeadlessRequest(request) {
-    return new Promise((resolve, reject) => {
-        if (!headlessProcess || !headlessReady) {
-            return reject(new Error('LumenHeadless is not running'));
-        }
-        headlessResponseCb = resolve;
-        headlessProcess.stdin.write(JSON.stringify(request) + '\n');
+    const queued = requestQueue.then(() => {
+        return new Promise((resolve, reject) => {
+            if (!headlessProcess || !headlessReady) {
+                return reject(new Error("LumenHeadless is not running"));
+            }
+            headlessResponseCb = resolve;
+            headlessProcess.stdin.write(JSON.stringify(request) + "\n");
+        });
     });
+    requestQueue = queued.catch(() => {});
+    return queued;
 }
 
 async function validateDocument(document) {
@@ -463,35 +475,35 @@ async function validateDocument(document) {
 
     try {
         const response = await sendHeadlessRequest({
-            op: 'compile',
+            op: "compile",
             source: source,
             name: name
         });
 
         if (response.ok) {
             diagnosticCollection.set(document.uri, []);
-            outputChannel.appendLine('Validation OK: ' + name);
+            outputChannel.appendLine("Validation OK: " + name);
             return false;
         }
 
         const errors = response.errors || [];
-        const isCompilePhase = response.phase === 'compile';
+        const isCompilePhase = response.phase === "compile";
         const diagnostics = errors.map((err) => {
             const line = Math.max(0, (err.line || 1) - 1);
             const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
-            const msg = isCompilePhase ? '[Java compile] ' + err.message : err.message;
+            const msg = isCompilePhase ? "[Java compile] " + err.message : err.message;
             const diag = new vscode.Diagnostic(range, msg, vscode.DiagnosticSeverity.Error);
-            diag.source = 'LumenHeadless';
+            diag.source = "LumenHeadless";
             return diag;
         });
 
         diagnosticCollection.set(document.uri, diagnostics);
-        outputChannel.appendLine('Validation found ' + diagnostics.length + ' error(s) in ' + name);
+        outputChannel.appendLine("Validation found " + diagnostics.length + " error(s) in " + name);
         return diagnostics.length > 0;
     } catch (err) {
-        outputChannel.appendLine('Validation request failed: ' + err.message);
-        vscode.window.showErrorMessage('Validation failed: ' + err.message);
-        return false;
+        outputChannel.appendLine("Validation request failed: " + err.message);
+        vscode.window.showErrorMessage("Validation failed: " + err.message);
+        return true;
     }
 }
 
@@ -499,20 +511,22 @@ function startValidationLoop() {
     stopValidationLoop();
 
     textChangeDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
-        if (e.document.languageId === 'lumen') {
+        if (e.document.languageId === "lumen") {
             lastTypeTime = Date.now();
         }
     });
 
     validationTimer = setInterval(async () => {
+        if (validationInFlight) return;
+
         const editor = vscode.window.activeTextEditor;
-        if (!editor || editor.document.languageId !== 'lumen') {
+        if (!editor || editor.document.languageId !== "lumen") {
             stopValidationLoop();
             return;
         }
 
         if (Date.now() - lastTypeTime > 180000) {
-            outputChannel.appendLine('Validation loop stopped: no typing for 180s');
+            outputChannel.appendLine("Validation loop stopped: no typing for 180s");
             stopValidationLoop();
             return;
         }
@@ -522,11 +536,16 @@ function startValidationLoop() {
             return;
         }
 
-        const hasErrors = await validateDocument(editor.document);
-        if (!hasErrors) {
-            vscode.window.showInformationMessage('Lumen validation passed!');
-            outputChannel.appendLine('Validation loop stopped: all errors resolved');
-            stopValidationLoop();
+        validationInFlight = true;
+        try {
+            const hasErrors = await validateDocument(editor.document);
+            if (!hasErrors) {
+                vscode.window.showInformationMessage("Lumen validation passed!");
+                outputChannel.appendLine("Validation loop stopped: all errors resolved");
+                stopValidationLoop();
+            }
+        } finally {
+            validationInFlight = false;
         }
     }, 2000);
 }
