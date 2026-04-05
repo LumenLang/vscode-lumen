@@ -27,6 +27,22 @@
   ],
   "main": "./extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "lumen.showTestScript",
+        "title": "Show Test luma script",
+        "icon": "$(beaker)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "lumen.showTestScript",
+          "group": "navigation",
+          "when": "resourceLangId == lumen"
+        }
+      ]
+    },
     "languages": [
       {
         "id": "lumen",

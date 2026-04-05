@@ -16,6 +16,10 @@ let client;
 async function activate(context) {
     const output = vscode.window.createOutputChannel("Lumen LSP");
 
+    context.subscriptions.push(vscode.commands.registerCommand('lumen.showTestScript', () => {
+        vscode.window.showInformationMessage('Show Test luma script clicked!');
+    }));
+
     const jarPath = path.join(context.extensionPath, "server", "LumenLSP.jar");
     if (!fs.existsSync(jarPath)) {
         vscode.window.showErrorMessage(
