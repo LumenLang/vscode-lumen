@@ -3,6 +3,7 @@
   "displayName": "Lumen Language",
   "description": "Language support for Lumen (.luma) via the Lumen LSP.",
   "version": "0.1.2",
+  "icon": "icons/lumen.png",
   "publisher": "lumenlang",
   "license": "GPL-3.0",
   "engines": {
@@ -51,7 +52,11 @@
         ],
         "extensions": [
           ".luma"
-        ]
+        ],
+        "icon": {
+          "light": "./icons/lumen.png",
+          "dark": "./icons/lumen.png"
+        }
       }
     ]
   },
