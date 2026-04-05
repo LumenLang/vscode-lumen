@@ -449,7 +449,14 @@ async function ensureHeadless() {
         });
 
         readyTimeout = setTimeout(() => {
-            settle(() => reject(new Error("LumenHeadless did not become ready within 30s")));
+            settle(() => {
+                if (headlessProcess) {
+                    headlessProcess.kill();
+                    headlessProcess = null;
+                    headlessReady = false;
+                }
+                reject(new Error("LumenHeadless did not become ready within 30s"));
+            });
         }, 30000);
     });
 }
@@ -460,8 +467,24 @@ function sendHeadlessRequest(request) {
             if (!headlessProcess || !headlessReady) {
                 return reject(new Error("LumenHeadless is not running"));
             }
-            headlessResponseCb = resolve;
-            headlessProcess.stdin.write(JSON.stringify(request) + "\n");
+
+            const timeout = setTimeout(() => {
+                headlessResponseCb = null;
+                reject(new Error("LumenHeadless request timed out after 30s"));
+            }, 30000);
+
+            headlessResponseCb = (response) => {
+                clearTimeout(timeout);
+                resolve(response);
+            };
+
+            headlessProcess.stdin.write(JSON.stringify(request) + "\n", (err) => {
+                if (err) {
+                    clearTimeout(timeout);
+                    headlessResponseCb = null;
+                    reject(new Error("Failed to write to LumenHeadless: " + err.message));
+                }
+            });
         });
     });
     requestQueue = queued.catch(() => {});
@@ -471,7 +494,6 @@ function sendHeadlessRequest(request) {
 async function validateDocument(document) {
     const source = document.getText();
     const name = path.basename(document.fileName);
-    lastValidatedSource = source;
 
     try {
         const response = await sendHeadlessRequest({
@@ -479,6 +501,8 @@ async function validateDocument(document) {
             source: source,
             name: name
         });
+
+        lastValidatedSource = source;
 
         if (response.ok) {
             diagnosticCollection.set(document.uri, []);
