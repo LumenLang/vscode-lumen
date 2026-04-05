@@ -24,6 +24,7 @@ let extensionContext = null;
 let outputChannel = null;
 let requestQueue = Promise.resolve();
 let validationInFlight = false;
+let statusBarItem = null;
 
 /**
  * @param {vscode.ExtensionContext} context
@@ -37,6 +38,13 @@ async function activate(context) {
     diagnosticCollection = vscode.languages.createDiagnosticCollection("lumen-headless");
     context.subscriptions.push(diagnosticCollection);
 
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    context.subscriptions.push(statusBarItem);
+
+    context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((doc) => {
+        diagnosticCollection.delete(doc.uri);
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand("lumen.validateScript", async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor || editor.document.languageId !== "lumen") {
@@ -45,21 +53,17 @@ async function activate(context) {
         }
 
         stopValidationLoop();
-
-        try {
-            await ensureHeadless();
-        } catch (err) {
-            vscode.window.showErrorMessage("Failed to start LumenHeadless: " + err.message);
-            return;
-        }
-
         lastTypeTime = Date.now();
 
-        const hasErrors = await validateDocument(editor.document);
-        if (hasErrors) {
-            startValidationLoop();
-        } else {
-            vscode.window.showInformationMessage("Lumen validation passed!");
+        try {
+            const hasErrors = await validateDocument(editor.document);
+            if (hasErrors) {
+                startValidationLoop();
+            } else {
+                vscode.window.showInformationMessage("Lumen validation passed!");
+            }
+        } catch (err) {
+            vscode.window.showErrorMessage("Validation failed: " + err.message);
         }
     }));
 
@@ -470,6 +474,11 @@ function sendHeadlessRequest(request) {
 
             const timeout = setTimeout(() => {
                 headlessResponseCb = null;
+                if (headlessProcess) {
+                    headlessProcess.kill();
+                    headlessProcess = null;
+                    headlessReady = false;
+                }
                 reject(new Error("LumenHeadless request timed out after 30s"));
             }, 30000);
 
@@ -492,10 +501,15 @@ function sendHeadlessRequest(request) {
 }
 
 async function validateDocument(document) {
+    statusBarItem.text = "$(sync~spin) Lumen: Validating...";
+    statusBarItem.show();
+
     const source = document.getText();
     const name = path.basename(document.fileName);
 
     try {
+        await ensureHeadless();
+
         const response = await sendHeadlessRequest({
             op: "compile",
             source: source,
@@ -526,8 +540,9 @@ async function validateDocument(document) {
         return diagnostics.length > 0;
     } catch (err) {
         outputChannel.appendLine("Validation request failed: " + err.message);
-        vscode.window.showErrorMessage("Validation failed: " + err.message);
-        return true;
+        throw err;
+    } finally {
+        statusBarItem.hide();
     }
 }
 
@@ -568,6 +583,10 @@ function startValidationLoop() {
                 outputChannel.appendLine("Validation loop stopped: all errors resolved");
                 stopValidationLoop();
             }
+        } catch (err) {
+            outputChannel.appendLine("Validation loop error: " + err.message);
+            vscode.window.showErrorMessage("Lumen: validation stopped — " + err.message);
+            stopValidationLoop();
         } finally {
             validationInFlight = false;
         }
