@@ -4,20 +4,69 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const os = require("os");
 
 /** @type {lsp.LanguageClient | undefined} */
 let client;
 
+let headlessProcess = null;
+let headlessReady = false;
+let headlessBuffer = '';
+let headlessResponseCb = null;
+let diagnosticCollection;
+let validationTimer = null;
+let lastValidatedSource = null;
+let lastTypeTime = 0;
+let textChangeDisposable = null;
+let resolvedJavaPath = null;
+let extensionContext = null;
+let outputChannel = null;
+
 /**
  * @param {vscode.ExtensionContext} context
  */
 async function activate(context) {
-    const output = vscode.window.createOutputChannel("Lumen LSP");
+    extensionContext = context;
+    outputChannel = vscode.window.createOutputChannel("Lumen LSP");
+    const output = outputChannel;
 
-    context.subscriptions.push(vscode.commands.registerCommand('lumen.showTestScript', () => {
-        vscode.window.showInformationMessage('Show Test luma script clicked!');
+    diagnosticCollection = vscode.languages.createDiagnosticCollection('lumen-headless');
+    context.subscriptions.push(diagnosticCollection);
+
+    context.subscriptions.push(vscode.commands.registerCommand('lumen.validateScript', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.document.languageId !== 'lumen') {
+            vscode.window.showWarningMessage('No active Lumen script to validate.');
+            return;
+        }
+
+        stopValidationLoop();
+
+        try {
+            await ensureHeadless();
+        } catch (err) {
+            vscode.window.showErrorMessage('Failed to start LumenHeadless: ' + err.message);
+            return;
+        }
+
+        lastTypeTime = Date.now();
+        textChangeDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
+            if (e.document.languageId === 'lumen') {
+                lastTypeTime = Date.now();
+            }
+        });
+
+        const hasErrors = await validateDocument(editor.document);
+        if (hasErrors) {
+            startValidationLoop();
+        } else {
+            vscode.window.showInformationMessage('Lumen validation passed!');
+            if (textChangeDisposable) {
+                textChangeDisposable.dispose();
+                textChangeDisposable = null;
+            }
+        }
     }));
 
     const jarPath = path.join(context.extensionPath, "server", "LumenLSP.jar");
@@ -55,6 +104,15 @@ async function activate(context) {
 }
 
 async function deactivate() {
+    stopValidationLoop();
+    if (headlessProcess) {
+        headlessProcess.kill();
+        headlessProcess = null;
+        headlessReady = false;
+    }
+    if (diagnosticCollection) {
+        diagnosticCollection.dispose();
+    }
     if (client) {
         await client.stop();
     }
@@ -305,6 +363,183 @@ function extractArchive(archivePath, destDir, ext, output) {
             });
         }
     });
+}
+
+async function ensureHeadless() {
+    if (headlessProcess && headlessReady) return;
+
+    if (headlessProcess) {
+        headlessProcess.kill();
+        headlessProcess = null;
+        headlessReady = false;
+    }
+
+    const jarPath = path.join(extensionContext.extensionPath, "server", "LumenHeadless.jar");
+    if (!fs.existsSync(jarPath)) {
+        throw new Error("LumenHeadless.jar not found");
+    }
+
+    if (!resolvedJavaPath) {
+        resolvedJavaPath = await resolveJava(extensionContext, outputChannel);
+    }
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+
+        headlessProcess = spawn(resolvedJavaPath, ["-jar", jarPath, "--server"], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        headlessBuffer = '';
+
+        headlessProcess.stdout.on('data', (data) => {
+            headlessBuffer += data.toString();
+            let idx;
+            while ((idx = headlessBuffer.indexOf('\n')) !== -1) {
+                const line = headlessBuffer.substring(0, idx).trim();
+                headlessBuffer = headlessBuffer.substring(idx + 1);
+                if (!line) continue;
+
+                try {
+                    const parsed = JSON.parse(line);
+                    if (!settled && parsed.status === 'ready') {
+                        settled = true;
+                        headlessReady = true;
+                        outputChannel.appendLine('LumenHeadless ready: ' + JSON.stringify(parsed));
+                        resolve();
+                    } else if (headlessResponseCb) {
+                        const cb = headlessResponseCb;
+                        headlessResponseCb = null;
+                        cb(parsed);
+                    }
+                } catch (e) {
+                    outputChannel.appendLine('LumenHeadless stdout (unparseable): ' + line);
+                }
+            }
+        });
+
+        headlessProcess.stderr.on('data', (data) => {
+            outputChannel.appendLine('LumenHeadless stderr: ' + data.toString().trim());
+        });
+
+        headlessProcess.on('close', (code) => {
+            outputChannel.appendLine('LumenHeadless exited with code ' + code);
+            headlessProcess = null;
+            headlessReady = false;
+            if (!settled) {
+                settled = true;
+                reject(new Error('LumenHeadless exited before ready (code ' + code + ')'));
+            }
+            if (headlessResponseCb) {
+                const cb = headlessResponseCb;
+                headlessResponseCb = null;
+                cb({ ok: false, error: 'Process exited unexpectedly' });
+            }
+        });
+
+        setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                reject(new Error('LumenHeadless did not become ready within 30s'));
+            }
+        }, 30000);
+    });
+}
+
+function sendHeadlessRequest(request) {
+    return new Promise((resolve, reject) => {
+        if (!headlessProcess || !headlessReady) {
+            return reject(new Error('LumenHeadless is not running'));
+        }
+        headlessResponseCb = resolve;
+        headlessProcess.stdin.write(JSON.stringify(request) + '\n');
+    });
+}
+
+async function validateDocument(document) {
+    const source = document.getText();
+    const name = path.basename(document.fileName);
+    lastValidatedSource = source;
+
+    try {
+        const response = await sendHeadlessRequest({
+            op: 'compile',
+            source: source,
+            name: name
+        });
+
+        if (response.ok) {
+            diagnosticCollection.set(document.uri, []);
+            outputChannel.appendLine('Validation OK: ' + name);
+            return false;
+        }
+
+        const errors = response.errors || [];
+        const isCompilePhase = response.phase === 'compile';
+        const diagnostics = errors.map((err) => {
+            const line = Math.max(0, (err.line || 1) - 1);
+            const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
+            const msg = isCompilePhase ? '[Java compile] ' + err.message : err.message;
+            const diag = new vscode.Diagnostic(range, msg, vscode.DiagnosticSeverity.Error);
+            diag.source = 'LumenHeadless';
+            return diag;
+        });
+
+        diagnosticCollection.set(document.uri, diagnostics);
+        outputChannel.appendLine('Validation found ' + diagnostics.length + ' error(s) in ' + name);
+        return diagnostics.length > 0;
+    } catch (err) {
+        outputChannel.appendLine('Validation request failed: ' + err.message);
+        vscode.window.showErrorMessage('Validation failed: ' + err.message);
+        return false;
+    }
+}
+
+function startValidationLoop() {
+    stopValidationLoop();
+
+    textChangeDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
+        if (e.document.languageId === 'lumen') {
+            lastTypeTime = Date.now();
+        }
+    });
+
+    validationTimer = setInterval(async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.document.languageId !== 'lumen') {
+            stopValidationLoop();
+            return;
+        }
+
+        if (Date.now() - lastTypeTime > 180000) {
+            outputChannel.appendLine('Validation loop stopped: no typing for 180s');
+            stopValidationLoop();
+            return;
+        }
+
+        const currentSource = editor.document.getText();
+        if (currentSource === lastValidatedSource) {
+            return;
+        }
+
+        const hasErrors = await validateDocument(editor.document);
+        if (!hasErrors) {
+            vscode.window.showInformationMessage('Lumen validation passed!');
+            outputChannel.appendLine('Validation loop stopped: all errors resolved');
+            stopValidationLoop();
+        }
+    }, 2000);
+}
+
+function stopValidationLoop() {
+    if (validationTimer) {
+        clearInterval(validationTimer);
+        validationTimer = null;
+    }
+    if (textChangeDisposable) {
+        textChangeDisposable.dispose();
+        textChangeDisposable = null;
+    }
 }
 
 module.exports = { activate, deactivate };

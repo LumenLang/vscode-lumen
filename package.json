@@ -1,7 +1,7 @@
 {
   "name": "lumenlang",
   "displayName": "Lumen Language",
-  "description": "Language support for Lumen (.luma) via the Lumen LSP.",
+  "description": "Language support for Lumen (.luma).",
   "version": "0.1.2",
   "icon": "icons/lumen.png",
   "publisher": "lumenlang",
@@ -30,15 +30,15 @@
   "contributes": {
     "commands": [
       {
-        "command": "lumen.showTestScript",
-        "title": "Show Test luma script",
+        "command": "lumen.validateScript",
+        "title": "Validate Lumen Script",
         "icon": "$(beaker)"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "lumen.showTestScript",
+          "command": "lumen.validateScript",
           "group": "navigation",
           "when": "resourceLangId == lumen"
         }
