@@ -2,7 +2,7 @@
   "name": "lumenlang",
   "displayName": "Lumen Language",
   "description": "Language support for Lumen (.luma).",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "icon": "icons/lumen.png",
   "publisher": "lumenlang",
   "license": "GPL-3.0",
@@ -80,7 +80,7 @@
         "lumen.validation.frequency": {
           "type": "integer",
           "default": 2000,
-          "minimum": 500,
+          "minimum": 250,
           "maximum": 30000,
           "description": "How often (in milliseconds) to re-validate on a schedule. Only applies when trigger is 'schedule'."
         },

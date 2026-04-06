@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.4] - 2026-04-06
+
+### Changed
+- Updated Lumen LSP
+
+### Fixed
+- Fixed revalidation not triggering properly on intervals
+- Lowered minimum revalidation interval to 250 ms
+
 ## [0.1.3] - 2026-04-06
 
 ### Added

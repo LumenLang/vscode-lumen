@@ -53,22 +53,22 @@ async function activate(context) {
     }));
 
     context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(async (editor) => {
+        stopValidationLoop();
         if (!editor || editor.document.languageId !== "lumen") return;
         const config = vscode.workspace.getConfiguration("lumen");
         if (!config.get("validation.enabled", true)) return;
         if (config.get("validation.trigger", "schedule") !== "schedule") return;
-        stopValidationLoop();
-        const errorCount = await runValidationAndNotify(editor.document, false);
-        if (errorCount > 0) startValidationLoop();
+        await runValidationAndNotify(editor.document, false);
+        startValidationLoop();
     }));
 
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor && activeEditor.document.languageId === "lumen") {
         const config = vscode.workspace.getConfiguration("lumen");
         if (config.get("validation.enabled", true) && config.get("validation.trigger", "schedule") === "schedule") {
-            runValidationAndNotify(activeEditor.document, false).then((errorCount) => {
-                if (errorCount > 0) startValidationLoop();
-            }).catch(() => {});
+            runValidationAndNotify(activeEditor.document, false).catch(() => {}).finally(() => {
+                startValidationLoop();
+            });
         }
     }
 
@@ -86,8 +86,8 @@ async function activate(context) {
         const trigger = config.get("validation.trigger", "schedule");
 
         try {
-            const errorCount = await runValidationAndNotify(editor.document, true);
-            if (errorCount > 0 && trigger === "schedule") {
+            await runValidationAndNotify(editor.document, true);
+            if (trigger === "schedule") {
                 startValidationLoop();
             }
         } catch (err) {
@@ -641,6 +641,7 @@ async function validateDocument(document) {
 
 function startValidationLoop() {
     stopValidationLoop();
+    let hadErrors = false;
 
     validationTimer = setInterval(async () => {
         if (validationInFlight) return;
@@ -665,14 +666,14 @@ function startValidationLoop() {
         validationInFlight = true;
         try {
             const errorCount = await validateDocument(editor.document);
-            if (errorCount === 0) {
+            if (errorCount === 0 && hadErrors) {
                 vscode.window.withProgress(
                     { location: vscode.ProgressLocation.Notification, title: "Lumen: all errors resolved!", cancellable: false },
                     () => new Promise((res) => setTimeout(res, 2000))
                 );
-                outputChannel.appendLine("Validation loop stopped: all errors resolved");
-                stopValidationLoop();
+                outputChannel.appendLine("All errors resolved");
             }
+            hadErrors = errorCount > 0;
         } catch (err) {
             outputChannel.appendLine("Validation loop error: " + err.message);
             vscode.window.showErrorMessage("Lumen: validation stopped \u2014 " + err.message);
