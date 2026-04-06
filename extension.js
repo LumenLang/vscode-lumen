@@ -17,7 +17,6 @@ let headlessResponseCb = null;
 let diagnosticCollection;
 let validationTimer = null;
 let lastValidatedSource = null;
-let textChangeDisposable = null;
 let resolvedJavaPath = null;
 let extensionContext = null;
 let outputChannel = null;
@@ -82,7 +81,6 @@ async function activate(context) {
         }
 
         stopValidationLoop();
-        lastTypeTime = Date.now();
 
         const config = vscode.workspace.getConfiguration("lumen");
         const trigger = config.get("validation.trigger", "schedule");
@@ -689,10 +687,6 @@ function stopValidationLoop() {
     if (validationTimer) {
         clearInterval(validationTimer);
         validationTimer = null;
-    }
-    if (textChangeDisposable) {
-        textChangeDisposable.dispose();
-        textChangeDisposable = null;
     }
 }
 

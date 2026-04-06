@@ -36,7 +36,7 @@ Hex colors inside MiniColorize strings show inline previews with a color picker.
 
 ## Requirements
 
-- VS Code 1.80+
+- VS Code 1.82+
 - Java 17+ is needed; the extension will download Java 21 if needed.
 
 ## Extension Settings
