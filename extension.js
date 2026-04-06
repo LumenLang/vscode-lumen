@@ -25,6 +25,7 @@ let outputChannel = null;
 let requestQueue = Promise.resolve();
 let validationInFlight = false;
 let statusBarItem = null;
+let headlessStarting = null;
 
 /**
  * @param {vscode.ExtensionContext} context
@@ -46,7 +47,8 @@ async function activate(context) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand("lumen.validateScript", async () => {
-        const editor = vscode.window.activeTextEditor;
+        const editor = vscode.window.activeTextEditor
+            || vscode.window.visibleTextEditors.find((e) => e.document.languageId === "lumen");
         if (!editor || editor.document.languageId !== "lumen") {
             vscode.window.showWarningMessage("No active Lumen script to validate.");
             return;
@@ -56,11 +58,18 @@ async function activate(context) {
         lastTypeTime = Date.now();
 
         try {
-            const hasErrors = await validateDocument(editor.document);
-            if (hasErrors) {
+            const errorCount = await validateDocument(editor.document);
+            if (errorCount > 0) {
+                vscode.window.withProgress(
+                    { location: vscode.ProgressLocation.Notification, title: "Lumen: " + errorCount + " error" + (errorCount === 1 ? "" : "s") + " found", cancellable: false },
+                    () => new Promise((res) => setTimeout(res, 2000))
+                );
                 startValidationLoop();
             } else {
-                vscode.window.showInformationMessage("Lumen validation passed!");
+                vscode.window.withProgress(
+                    { location: vscode.ProgressLocation.Notification, title: "Lumen: validation passed!", cancellable: false },
+                    () => new Promise((res) => setTimeout(res, 2000))
+                );
             }
         } catch (err) {
             vscode.window.showErrorMessage("Validation failed: " + err.message);
@@ -366,6 +375,10 @@ function extractArchive(archivePath, destDir, ext, output) {
 async function ensureHeadless() {
     if (headlessProcess && headlessReady) return;
 
+    if (headlessStarting) {
+        return headlessStarting;
+    }
+
     if (headlessProcess) {
         headlessProcess.kill();
         headlessProcess = null;
@@ -381,9 +394,7 @@ async function ensureHeadless() {
         resolvedJavaPath = await resolveJava(extensionContext, outputChannel);
     }
 
-    requestQueue = Promise.resolve();
-
-    return new Promise((resolve, reject) => {
+    headlessStarting = new Promise((resolve, reject) => {
         let settled = false;
         let readyTimeout;
 
@@ -404,6 +415,7 @@ async function ensureHeadless() {
             outputChannel.appendLine("LumenHeadless spawn error: " + err.message);
             headlessProcess = null;
             headlessReady = false;
+            headlessStarting = null;
             settle(() => reject(new Error("Failed to spawn LumenHeadless: " + err.message)));
         });
 
@@ -419,6 +431,7 @@ async function ensureHeadless() {
                     const parsed = JSON.parse(line);
                     if (!settled && parsed.status === "ready") {
                         headlessReady = true;
+                        requestQueue = Promise.resolve();
                         outputChannel.appendLine("LumenHeadless ready: " + JSON.stringify(parsed));
                         settle(() => resolve());
                     } else if (headlessResponseCb) {
@@ -440,6 +453,7 @@ async function ensureHeadless() {
             outputChannel.appendLine("LumenHeadless exited with code " + code);
             headlessProcess = null;
             headlessReady = false;
+            headlessStarting = null;
             settle(() => reject(new Error("LumenHeadless exited before ready (code " + code + ")")));
             if (headlessResponseCb) {
                 const cb = headlessResponseCb;
@@ -458,11 +472,18 @@ async function ensureHeadless() {
                     headlessProcess.kill();
                     headlessProcess = null;
                     headlessReady = false;
+                    headlessStarting = null;
                 }
                 reject(new Error("LumenHeadless did not become ready within 30s"));
             });
         }, 30000);
     });
+
+    try {
+        await headlessStarting;
+    } finally {
+        headlessStarting = null;
+    }
 }
 
 function sendHeadlessRequest(request) {
@@ -528,7 +549,8 @@ async function validateDocument(document) {
         const isCompilePhase = response.phase === "compile";
         const diagnostics = errors.map((err) => {
             const line = Math.max(0, (err.line || 1) - 1);
-            const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
+            const lineLength = line < document.lineCount ? document.lineAt(line).range.end.character : 1000;
+            const range = new vscode.Range(line, 0, line, lineLength);
             const msg = isCompilePhase ? "[Java compile] " + err.message : err.message;
             const diag = new vscode.Diagnostic(range, msg, vscode.DiagnosticSeverity.Error);
             diag.source = "LumenHeadless";
@@ -537,7 +559,7 @@ async function validateDocument(document) {
 
         diagnosticCollection.set(document.uri, diagnostics);
         outputChannel.appendLine("Validation found " + diagnostics.length + " error(s) in " + name);
-        return diagnostics.length > 0;
+        return diagnostics.length;
     } catch (err) {
         outputChannel.appendLine("Validation request failed: " + err.message);
         throw err;
@@ -577,9 +599,12 @@ function startValidationLoop() {
 
         validationInFlight = true;
         try {
-            const hasErrors = await validateDocument(editor.document);
-            if (!hasErrors) {
-                vscode.window.showInformationMessage("Lumen validation passed!");
+            const errorCount = await validateDocument(editor.document);
+            if (errorCount === 0) {
+                vscode.window.withProgress(
+                    { location: vscode.ProgressLocation.Notification, title: "Lumen: all errors resolved!", cancellable: false },
+                    () => new Promise((res) => setTimeout(res, 2000))
+                );
                 outputChannel.appendLine("Validation loop stopped: all errors resolved");
                 stopValidationLoop();
             }
