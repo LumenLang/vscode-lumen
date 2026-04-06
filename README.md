@@ -45,5 +45,5 @@ Hex colors inside MiniColorize strings show inline previews with a color picker.
 |---------|------|---------|-------------|
 | `lumen.validation.enabled` | `boolean` | `true` | Enable validation via Lumen Headless (100% accurate diagnostics, identical plugin pipeline to a real server, without needing a Minecraft server running). |
 | `lumen.validation.trigger` | `"schedule"` \| `"save"` | `"schedule"` | When to run validation. `"schedule"` validates on a fixed interval (skips if content hasn't changed). `"save"` only validates when the file is saved. |
-| `lumen.validation.frequency` | `integer` | `2000` | How often (in ms) to re-validate on schedule. Only applies when trigger is `"schedule"`. Min 500, max 30000. |
+| `lumen.validation.frequency` | `integer` | `2000` | How often (in ms) to re-validate on schedule. Only applies when trigger is `"schedule"`. |
 | `lumen.lsp.diagnostics` | `boolean` | `false` | Allow the Lumen LSP to show its own diagnostics alongside Headless validation. LSP diagnostics are less accurate. |
