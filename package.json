@@ -58,7 +58,39 @@
           "dark": "./icons/lumen.png"
         }
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Lumen",
+      "properties": {
+        "lumen.validation.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable validation via Lumen Headless (100% accurate diagnostics, identical plugin pipeline to a real server, without needing a Minecraft server running)."
+        },
+        "lumen.validation.trigger": {
+          "type": "string",
+          "default": "schedule",
+          "enum": ["schedule", "save"],
+          "enumDescriptions": [
+            "Validate automatically on a fixed interval (skips if content hasn't changed since last check).",
+            "Only validate when the file is saved."
+          ],
+          "description": "When to run Lumen Headless validation."
+        },
+        "lumen.validation.frequency": {
+          "type": "integer",
+          "default": 2000,
+          "minimum": 500,
+          "maximum": 30000,
+          "description": "How often (in milliseconds) to re-validate on a schedule. Only applies when trigger is 'schedule'."
+        },
+        "lumen.lsp.diagnostics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the Lumen LSP to show its own diagnostics alongside Headless validation. Note: LSP diagnostics are less accurate than Headless, but they are faster when typing constantly."
+        }
+      }
+    }
   },
   "scripts": {
     "package": "vsce package",

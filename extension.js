@@ -17,7 +17,6 @@ let headlessResponseCb = null;
 let diagnosticCollection;
 let validationTimer = null;
 let lastValidatedSource = null;
-let lastTypeTime = 0;
 let textChangeDisposable = null;
 let resolvedJavaPath = null;
 let extensionContext = null;
@@ -46,6 +45,34 @@ async function activate(context) {
         diagnosticCollection.delete(doc.uri);
     }));
 
+    context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(async (doc) => {
+        if (doc.languageId !== "lumen") return;
+        const config = vscode.workspace.getConfiguration("lumen");
+        if (!config.get("validation.enabled", true)) return;
+        if (config.get("validation.trigger", "schedule") !== "save") return;
+        await runValidationAndNotify(doc, false);
+    }));
+
+    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(async (editor) => {
+        if (!editor || editor.document.languageId !== "lumen") return;
+        const config = vscode.workspace.getConfiguration("lumen");
+        if (!config.get("validation.enabled", true)) return;
+        if (config.get("validation.trigger", "schedule") !== "schedule") return;
+        stopValidationLoop();
+        const errorCount = await runValidationAndNotify(editor.document, false);
+        if (errorCount > 0) startValidationLoop();
+    }));
+
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document.languageId === "lumen") {
+        const config = vscode.workspace.getConfiguration("lumen");
+        if (config.get("validation.enabled", true) && config.get("validation.trigger", "schedule") === "schedule") {
+            runValidationAndNotify(activeEditor.document, false).then((errorCount) => {
+                if (errorCount > 0) startValidationLoop();
+            }).catch(() => {});
+        }
+    }
+
     context.subscriptions.push(vscode.commands.registerCommand("lumen.validateScript", async () => {
         const editor = vscode.window.activeTextEditor
             || vscode.window.visibleTextEditors.find((e) => e.document.languageId === "lumen");
@@ -57,19 +84,13 @@ async function activate(context) {
         stopValidationLoop();
         lastTypeTime = Date.now();
 
+        const config = vscode.workspace.getConfiguration("lumen");
+        const trigger = config.get("validation.trigger", "schedule");
+
         try {
-            const errorCount = await validateDocument(editor.document);
-            if (errorCount > 0) {
-                vscode.window.withProgress(
-                    { location: vscode.ProgressLocation.Notification, title: "Lumen: " + errorCount + " error" + (errorCount === 1 ? "" : "s") + " found", cancellable: false },
-                    () => new Promise((res) => setTimeout(res, 2000))
-                );
+            const errorCount = await runValidationAndNotify(editor.document, true);
+            if (errorCount > 0 && trigger === "schedule") {
                 startValidationLoop();
-            } else {
-                vscode.window.withProgress(
-                    { location: vscode.ProgressLocation.Notification, title: "Lumen: validation passed!", cancellable: false },
-                    () => new Promise((res) => setTimeout(res, 2000))
-                );
             }
         } catch (err) {
             vscode.window.showErrorMessage("Validation failed: " + err.message);
@@ -94,9 +115,15 @@ async function activate(context) {
         return;
     }
 
+    const config = vscode.workspace.getConfiguration("lumen");
+    const lspArgs = ["-jar", jarPath];
+    if (config.get("validation.enabled", true) && !config.get("lsp.diagnostics", false)) {
+        lspArgs.push("--no-errors");
+    }
+
     const serverOptions = {
         command: javaPath,
-        args: ["-jar", jarPath],
+        args: lspArgs,
         options: { stdio: "pipe" }
     };
 
@@ -521,6 +548,27 @@ function sendHeadlessRequest(request) {
     return queued;
 }
 
+async function runValidationAndNotify(document, alwaysNotifyOnPass) {
+    try {
+        const errorCount = await validateDocument(document);
+        if (errorCount > 0) {
+            vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: "Lumen: " + errorCount + " error" + (errorCount === 1 ? "" : "s") + " found", cancellable: false },
+                () => new Promise((res) => setTimeout(res, 2000))
+            );
+        } else if (alwaysNotifyOnPass) {
+            vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: "Lumen: validation passed!", cancellable: false },
+                () => new Promise((res) => setTimeout(res, 2000))
+            );
+        }
+        return errorCount;
+    } catch (err) {
+        vscode.window.showErrorMessage("Validation failed: " + err.message);
+        return 0;
+    }
+}
+
 async function validateDocument(document) {
     statusBarItem.text = "$(sync~spin) Lumen: Validating...";
     statusBarItem.show();
@@ -532,7 +580,7 @@ async function validateDocument(document) {
         await ensureHeadless();
 
         const response = await sendHeadlessRequest({
-            op: "compile",
+            op: "validate",
             source: source,
             name: name
         });
@@ -542,17 +590,42 @@ async function validateDocument(document) {
         if (response.ok) {
             diagnosticCollection.set(document.uri, []);
             outputChannel.appendLine("Validation OK: " + name);
-            return false;
+            return 0;
         }
 
         const errors = response.errors || [];
-        const isCompilePhase = response.phase === "compile";
         const diagnostics = errors.map((err) => {
-            const line = Math.max(0, (err.line || 1) - 1);
-            const lineLength = line < document.lineCount ? document.lineAt(line).range.end.character : 1000;
-            const range = new vscode.Range(line, 0, line, lineLength);
-            const msg = isCompilePhase ? "[Java compile] " + err.message : err.message;
-            const diag = new vscode.Diagnostic(range, msg, vscode.DiagnosticSeverity.Error);
+            const requestedLine = Math.max(0, (err.line || 1) - 1);
+            const hasLines = document.lineCount > 0;
+            const line = hasLines ? Math.min(requestedLine, document.lineCount - 1) : 0;
+            const docLine = hasLines ? document.lineAt(line) : null;
+            const fullLineText = docLine ? docLine.text : "";
+            const leadingWhitespace = fullLineText.match(/^(\s*)/)[1].length;
+
+            let startChar = leadingWhitespace;
+            let endChar = docLine ? docLine.range.end.character : 0;
+
+            const msgText = err.message || "";
+            const msgLines = msgText.split("\n");
+            for (let i = 1; i < msgLines.length; i++) {
+                const tildeMatch = msgLines[i].match(/^(\s*)(~+)\s*$/);
+                if (tildeMatch) {
+                    const srcLine = msgLines[i - 1];
+                    const pipeIdx = srcLine.indexOf("| ");
+                    if (pipeIdx >= 0) {
+                        const sourceStart = pipeIdx + 2;
+                        const colInStripped = tildeMatch[1].length - sourceStart;
+                        if (colInStripped >= 0) {
+                            startChar = leadingWhitespace + colInStripped;
+                            endChar = startChar + tildeMatch[2].length;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            const range = new vscode.Range(line, startChar, line, endChar);
+            const diag = new vscode.Diagnostic(range, msgText, vscode.DiagnosticSeverity.Error);
             diag.source = "LumenHeadless";
             return diag;
         });
@@ -571,12 +644,6 @@ async function validateDocument(document) {
 function startValidationLoop() {
     stopValidationLoop();
 
-    textChangeDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
-        if (e.document.languageId === "lumen") {
-            lastTypeTime = Date.now();
-        }
-    });
-
     validationTimer = setInterval(async () => {
         if (validationInFlight) return;
 
@@ -586,8 +653,8 @@ function startValidationLoop() {
             return;
         }
 
-        if (Date.now() - lastTypeTime > 180000) {
-            outputChannel.appendLine("Validation loop stopped: no typing for 180s");
+        const config = vscode.workspace.getConfiguration("lumen");
+        if (!config.get("validation.enabled", true) || config.get("validation.trigger", "schedule") !== "schedule") {
             stopValidationLoop();
             return;
         }
@@ -610,12 +677,12 @@ function startValidationLoop() {
             }
         } catch (err) {
             outputChannel.appendLine("Validation loop error: " + err.message);
-            vscode.window.showErrorMessage("Lumen: validation stopped — " + err.message);
+            vscode.window.showErrorMessage("Lumen: validation stopped \u2014 " + err.message);
             stopValidationLoop();
         } finally {
             validationInFlight = false;
         }
-    }, 2000);
+    }, vscode.workspace.getConfiguration("lumen").get("validation.frequency", 2000));
 }
 
 function stopValidationLoop() {
